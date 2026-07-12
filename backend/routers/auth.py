@@ -6,9 +6,10 @@ POST /auth/register — creates a new user (open in dev, restrict in prod).
 """
 
 from datetime import timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from backend import models, schemas
@@ -18,11 +19,16 @@ from backend.security import (
     create_access_token,
     get_current_user,
     hash_password,
+    decode_access_token,
     verify_password,
 )
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# Non-erroring bearer scheme: lets /auth/register be called with no token
+# during first-user bootstrap, while still parsing a token when present.
+_optional_oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 
 @router.post(
@@ -64,16 +70,51 @@ def login(
     )
 
 
+def _optional_current_user(
+    token: Optional[str] = Depends(_optional_oauth2),
+    db: Session = Depends(get_db),
+) -> Optional[models.User]:
+    """Resolve the caller if a valid token is present; otherwise return None."""
+    if not token:
+        return None
+    payload = decode_access_token(token)
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+    return db.query(models.User).filter(models.User.id == int(user_id)).first()
+
+
 @router.post(
     "/register",
     response_model=schemas.UserResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new user",
+    summary="Register a new user (first user bootstraps; thereafter Fleet Manager only)",
 )
 def register(
     payload: schemas.UserCreate,
     db: Session = Depends(get_db),
+    caller: Optional[models.User] = Depends(_optional_current_user),
 ):
+    """
+    RBAC-aware registration:
+      • If no users exist yet, the request is allowed (bootstrap the first admin).
+      • Otherwise the caller must be an authenticated Fleet Manager.
+    """
+    user_count = db.query(models.User).count()
+
+    if user_count > 0:
+        if caller is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to create additional users.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if caller.role != models.UserRole.FLEET_MANAGER:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only a Fleet Manager can register new users.",
+            )
+
     existing = db.query(models.User).filter(models.User.email == payload.email).first()
     if existing:
         raise HTTPException(

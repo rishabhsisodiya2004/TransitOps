@@ -5,10 +5,13 @@ GET /dashboard/kpis     — Real-time fleet KPI aggregations
 GET /reports/analytics  — Fuel efficiency, operational cost, and vehicle ROI
 """
 
+import csv
+import io
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
@@ -30,14 +33,39 @@ router = APIRouter(tags=["Dashboard & Analytics"])
 )
 def get_dashboard_kpis(
     db: Session = Depends(get_db),
+    vehicle_type: Optional[models.VehicleType] = Query(None, description="Filter by vehicle type"),
+    status: Optional[models.VehicleStatus] = Query(None, description="Filter by vehicle status"),
+    region: Optional[str] = Query(None, description="Filter by operating region"),
     _: models.User = Depends(get_current_user),
 ) -> schemas.DashboardKPIs:
     """
     Aggregates fleet-wide KPIs in a single round-trip using SQLAlchemy's
     conditional aggregation (CASE WHEN … THEN 1 ELSE 0 END counts).
+
+    Optional filters (vehicle_type / status / region) scope every KPI to the
+    matching subset of the fleet — including the trips and drivers attached to
+    those vehicles.
     """
+    # ── Apply optional filters to the vehicle set ────────────────────────────
+    def _apply_vehicle_filters(q):
+        if vehicle_type is not None:
+            q = q.filter(models.Vehicle.type == vehicle_type)
+        if status is not None:
+            q = q.filter(models.Vehicle.status == status)
+        if region is not None:
+            q = q.filter(models.Vehicle.region == region)
+        return q
+
+    filters_active = any(v is not None for v in (vehicle_type, status, region))
+
+    # Registration numbers in scope — used to constrain trip/driver KPIs.
+    scoped_reg_query = _apply_vehicle_filters(
+        db.query(models.Vehicle.registration_number)
+    )
+    scoped_regs = [r[0] for r in scoped_reg_query.all()]
+
     # ── Vehicle aggregations ─────────────────────────────────────────────────
-    v_stats = db.query(
+    v_stats = _apply_vehicle_filters(db.query(
         func.count(models.Vehicle.registration_number).label("total"),
         func.sum(
             case(
@@ -57,7 +85,7 @@ def get_dashboard_kpis(
         func.sum(
             case((models.Vehicle.status == models.VehicleStatus.RETIRED, 1), else_=0)
         ).label("retired"),
-    ).one()
+    )).one()
 
     total_vehicles    = v_stats.total or 0
     active_vehicles   = int(v_stats.active or 0)
@@ -71,7 +99,10 @@ def get_dashboard_kpis(
     )
 
     # ── Driver aggregations ──────────────────────────────────────────────────
-    d_stats = db.query(
+    # When a vehicle filter is active, "drivers" is scoped to those currently
+    # driving one of the in-scope vehicles (via a Dispatched trip). Without
+    # filters, all drivers are counted.
+    d_query = db.query(
         func.count(models.Driver.id).label("total"),
         func.sum(
             case((models.Driver.status == models.DriverStatus.AVAILABLE, 1), else_=0)
@@ -82,7 +113,18 @@ def get_dashboard_kpis(
         func.sum(
             case((models.Driver.status == models.DriverStatus.SUSPENDED, 1), else_=0)
         ).label("suspended"),
-    ).one()
+    )
+    if filters_active:
+        driver_ids_in_scope = (
+            db.query(models.Trip.driver_id)
+            .filter(
+                models.Trip.vehicle_id.in_(scoped_regs or [None]),
+                models.Trip.status == models.TripStatus.DISPATCHED,
+            )
+            .distinct()
+        )
+        d_query = d_query.filter(models.Driver.id.in_(driver_ids_in_scope))
+    d_stats = d_query.one()
 
     total_drivers     = d_stats.total or 0
     available_drivers = int(d_stats.available or 0)
@@ -90,38 +132,50 @@ def get_dashboard_kpis(
     suspended_drivers = int(d_stats.suspended or 0)
 
     # ── Trip aggregations ────────────────────────────────────────────────────
-    t_stats = db.query(
+    t_query = db.query(
         func.count(models.Trip.id).label("total"),
         func.sum(
             case((models.Trip.status == models.TripStatus.DISPATCHED, 1), else_=0)
         ).label("active"),
+        func.sum(
+            case((models.Trip.status == models.TripStatus.DRAFT, 1), else_=0)
+        ).label("pending"),
         func.sum(
             case((models.Trip.status == models.TripStatus.COMPLETED, 1), else_=0)
         ).label("completed"),
         func.sum(
             case((models.Trip.status == models.TripStatus.CANCELLED, 1), else_=0)
         ).label("cancelled"),
-    ).one()
+    )
+    if filters_active:
+        t_query = t_query.filter(models.Trip.vehicle_id.in_(scoped_regs or [None]))
+    t_stats = t_query.one()
 
     total_trips     = t_stats.total or 0
     active_trips    = int(t_stats.active or 0)
+    pending_trips   = int(t_stats.pending or 0)
     completed_trips = int(t_stats.completed or 0)
     cancelled_trips = int(t_stats.cancelled or 0)
 
     # ── Maintenance aggregations ─────────────────────────────────────────────
-    m_stats = db.query(
+    m_query = db.query(
         func.count(models.MaintenanceLog.id).label("total"),
         func.sum(
             case((models.MaintenanceLog.status == models.MaintenanceStatus.ACTIVE, 1), else_=0)
         ).label("open"),
-    ).one()
+    )
+    if filters_active:
+        m_query = m_query.filter(models.MaintenanceLog.vehicle_id.in_(scoped_regs or [None]))
+    m_stats = m_query.one()
 
     total_maintenance = m_stats.total or 0
     open_maintenance  = int(m_stats.open or 0)
 
     # ── Expense total ────────────────────────────────────────────────────────
-    total_expenses_result = db.query(func.coalesce(func.sum(models.FuelExpense.cost), 0.0)).scalar()
-    total_expenses = float(total_expenses_result)
+    e_query = db.query(func.coalesce(func.sum(models.FuelExpense.cost), 0.0))
+    if filters_active:
+        e_query = e_query.filter(models.FuelExpense.vehicle_id.in_(scoped_regs or [None]))
+    total_expenses = float(e_query.scalar())
 
     return schemas.DashboardKPIs(
         total_vehicles=total_vehicles,
@@ -137,6 +191,7 @@ def get_dashboard_kpis(
         suspended_drivers=suspended_drivers,
         total_trips=total_trips,
         active_trips=active_trips,
+        pending_trips=pending_trips,
         completed_trips=completed_trips,
         cancelled_trips=cancelled_trips,
         total_maintenance_logs=total_maintenance,
@@ -156,6 +211,7 @@ def get_dashboard_kpis(
 )
 def get_fleet_analytics(
     db: Session = Depends(get_db),
+    region: Optional[str] = Query(None, description="Filter analytics by operating region"),
     _: models.User = Depends(get_current_user),
 ) -> schemas.FleetAnalyticsReport:
     """
@@ -170,7 +226,10 @@ def get_fleet_analytics(
 
     Fleet-level aggregates are also computed.
     """
-    vehicles = db.query(models.Vehicle).all()
+    vehicles_query = db.query(models.Vehicle)
+    if region is not None:
+        vehicles_query = vehicles_query.filter(models.Vehicle.region == region)
+    vehicles = vehicles_query.all()
     vehicle_analytics: list[schemas.VehicleAnalytics] = []
 
     fleet_total_distance   = 0.0
@@ -287,6 +346,7 @@ def get_fleet_analytics(
             schemas.VehicleAnalytics(
                 registration_number=reg,
                 name_model=vehicle.name_model,
+                region=vehicle.region,
                 acquisition_cost=vehicle.acquisition_cost,
                 total_distance_km=round(total_distance, 2),
                 total_fuel_liters=round(effective_fuel, 2),
@@ -307,11 +367,8 @@ def get_fleet_analytics(
     )
     fleet_total_operational = round(fleet_total_fuel_cost + fleet_total_maint_cost, 2)
 
-    # Fleet ROI: total acquisition cost
-    fleet_acquisition = db.query(
-        func.coalesce(func.sum(models.Vehicle.acquisition_cost), 0.0)
-    ).scalar()
-    fleet_acquisition = float(fleet_acquisition)
+    # Fleet ROI: total acquisition cost over the (optionally region-filtered) set
+    fleet_acquisition = float(sum(v.acquisition_cost for v in vehicles))
 
     fleet_roi: Optional[float] = (
         round(
@@ -328,4 +385,76 @@ def get_fleet_analytics(
         fleet_total_revenue=round(fleet_total_revenue, 2),
         fleet_roi_pct=fleet_roi,
         vehicles=vehicle_analytics,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GET /reports/analytics.csv  — CSV export (spec §3.8)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get(
+    "/reports/analytics.csv",
+    summary="Export the per-vehicle analytics report as CSV",
+    response_class=StreamingResponse,
+)
+def export_fleet_analytics_csv(
+    db: Session = Depends(get_db),
+    region: Optional[str] = Query(None, description="Filter analytics by operating region"),
+    _: models.User = Depends(get_current_user),
+):
+    """
+    Streams the same per-vehicle analytics table produced by
+    GET /reports/analytics as a downloadable CSV file.
+    """
+    report = get_fleet_analytics(db=db, region=region, _=_)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "Registration Number",
+        "Vehicle",
+        "Region",
+        "Acquisition Cost",
+        "Total Distance (km)",
+        "Total Fuel (L)",
+        "Fuel Efficiency (km/L)",
+        "Total Fuel Cost",
+        "Total Maintenance Cost",
+        "Total Operational Cost",
+        "Total Revenue",
+        "ROI (%)",
+    ])
+    for v in report.vehicles:
+        writer.writerow([
+            v.registration_number,
+            v.name_model,
+            v.region or "",
+            v.acquisition_cost,
+            v.total_distance_km,
+            v.total_fuel_liters,
+            "" if v.fuel_efficiency_km_per_liter is None else v.fuel_efficiency_km_per_liter,
+            v.total_fuel_cost,
+            v.total_maintenance_cost,
+            v.total_operational_cost,
+            v.total_revenue,
+            "" if v.roi_pct is None else v.roi_pct,
+        ])
+
+    # Fleet summary row
+    writer.writerow([])
+    writer.writerow([
+        "FLEET TOTAL", "", "", "", "", "",
+        "" if report.fleet_fuel_efficiency_km_per_liter is None
+        else report.fleet_fuel_efficiency_km_per_liter,
+        "", "",
+        report.fleet_total_operational_cost,
+        report.fleet_total_revenue,
+        "" if report.fleet_roi_pct is None else report.fleet_roi_pct,
+    ])
+
+    buffer.seek(0)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=fleet_analytics.csv"},
     )

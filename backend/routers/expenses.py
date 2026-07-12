@@ -2,9 +2,12 @@
 TransitOps - Fuel & Expenses Router (CRUD)
 """
 
-from typing import List
+import csv
+import io
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend import models, schemas
@@ -76,6 +79,48 @@ def list_expenses(
         )
 
     return query.offset(skip).limit(limit).all()
+
+
+@router.get(
+    "/export.csv",
+    summary="Export expenses as CSV (spec §3.8)",
+    response_class=StreamingResponse,
+)
+def export_expenses_csv(
+    vehicle_id: Optional[str] = None,
+    expense_type: Optional[schemas.ExpenseType] = None,
+    db: Session = Depends(get_db),
+    _: models.User = Depends(get_current_user),
+):
+    """Streams all expenses (optionally filtered) as a downloadable CSV file."""
+    query = db.query(models.FuelExpense)
+    if vehicle_id:
+        query = query.filter(models.FuelExpense.vehicle_id == vehicle_id)
+    if expense_type:
+        query = query.filter(models.FuelExpense.expense_type == expense_type)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        ["ID", "Vehicle", "Type", "Liters", "Cost", "Date", "Notes"]
+    )
+    for e in query.order_by(models.FuelExpense.date.desc()).all():
+        writer.writerow([
+            e.id,
+            e.vehicle_id,
+            e.expense_type.value,
+            "" if e.liters is None else e.liters,
+            e.cost,
+            e.date.isoformat(),
+            e.notes or "",
+        ])
+
+    buffer.seek(0)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=expenses.csv"},
+    )
 
 
 @router.get(

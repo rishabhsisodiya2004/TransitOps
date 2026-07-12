@@ -2,9 +2,10 @@
 TransitOps - Vehicles Router (CRUD)
 """
 
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
 
 from backend import models, schemas
@@ -45,18 +46,43 @@ def create_vehicle(
 @router.get(
     "/",
     response_model=List[schemas.VehicleResponse],
-    summary="List all vehicles",
+    summary="List all vehicles (search / filter / sort)",
 )
 def list_vehicles(
     skip: int = 0,
     limit: int = 100,
-    status_filter: schemas.VehicleStatus = None,
+    status_filter: Optional[schemas.VehicleStatus] = None,
+    type_filter: Optional[schemas.VehicleType] = Query(None, description="Filter by vehicle type"),
+    region: Optional[str] = Query(None, description="Filter by operating region"),
+    search: Optional[str] = Query(None, description="Match registration number / model (case-insensitive)"),
+    sort_by: str = Query("registration_number", description="registration_number | odometer | acquisition_cost | status"),
+    order: str = Query("asc", description="asc | desc"),
     db: Session = Depends(get_db),
     _: models.User = Depends(get_current_user),
 ):
     query = db.query(models.Vehicle)
     if status_filter:
         query = query.filter(models.Vehicle.status == status_filter)
+    if type_filter:
+        query = query.filter(models.Vehicle.type == type_filter)
+    if region:
+        query = query.filter(models.Vehicle.region == region)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            models.Vehicle.registration_number.ilike(pattern)
+            | models.Vehicle.name_model.ilike(pattern)
+        )
+
+    sortable = {
+        "registration_number": models.Vehicle.registration_number,
+        "odometer": models.Vehicle.odometer,
+        "acquisition_cost": models.Vehicle.acquisition_cost,
+        "status": models.Vehicle.status,
+    }
+    sort_col = sortable.get(sort_by, models.Vehicle.registration_number)
+    query = query.order_by(desc(sort_col) if order == "desc" else asc(sort_col))
+
     return query.offset(skip).limit(limit).all()
 
 

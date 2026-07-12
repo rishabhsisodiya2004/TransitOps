@@ -133,6 +133,7 @@ class Vehicle(TimestampMixin, Base):
     type: Mapped[VehicleType] = mapped_column(
         SAEnum(VehicleType, name="vehicle_type"), nullable=False
     )
+    region: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
     max_load_capacity: Mapped[float] = mapped_column(Float, nullable=False)  # in kg
     odometer: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)  # in km
     acquisition_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
