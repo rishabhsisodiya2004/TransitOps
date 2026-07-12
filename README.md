@@ -32,7 +32,18 @@ TransitOps is a FastAPI fleet operations app that can run on SQLite for quick lo
 
    ```powershell
    python seed.py
-   ```
+   ``
+
+  
+  ## Security Features
+
+- JWT Authentication
+- Password Hashing (bcrypt)
+- Role-Based Access Control (RBAC)
+- Secure CORS Configuration
+- HTTP Security Headers
+- Protected REST APIs
+
 
 ## Notes
 
