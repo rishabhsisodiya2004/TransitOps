@@ -16,9 +16,10 @@ Trigger 2 : → Completed / Cancelled  ⟹  Vehicle + Driver reverted to "Availa
 """
 
 from datetime import date
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
 
 from backend import models, schemas
@@ -240,18 +241,43 @@ def create_trip(
 @router.get(
     "/",
     response_model=List[schemas.TripResponse],
-    summary="List all trips",
+    summary="List all trips (filter / search / sort)",
 )
 def list_trips(
     skip: int = 0,
     limit: int = 100,
-    status_filter: schemas.TripStatus = None,
+    status_filter: Optional[schemas.TripStatus] = None,
+    vehicle_id: Optional[str] = Query(None, description="Filter by vehicle registration number"),
+    driver_id: Optional[int] = Query(None, description="Filter by driver id"),
+    search: Optional[str] = Query(None, description="Match source / destination (case-insensitive)"),
+    sort_by: str = Query("created_at", description="created_at | planned_distance | cargo_weight | status"),
+    order: str = Query("desc", description="asc | desc"),
     db: Session = Depends(get_db),
     _current_user: models.User = Depends(get_current_user),
 ):
     query = db.query(models.Trip)
     if status_filter:
         query = query.filter(models.Trip.status == status_filter)
+    if vehicle_id:
+        query = query.filter(models.Trip.vehicle_id == vehicle_id)
+    if driver_id:
+        query = query.filter(models.Trip.driver_id == driver_id)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            models.Trip.source.ilike(pattern)
+            | models.Trip.destination.ilike(pattern)
+        )
+
+    sortable = {
+        "created_at": models.Trip.created_at,
+        "planned_distance": models.Trip.planned_distance,
+        "cargo_weight": models.Trip.cargo_weight,
+        "status": models.Trip.status,
+    }
+    sort_col = sortable.get(sort_by, models.Trip.created_at)
+    query = query.order_by(desc(sort_col) if order == "desc" else asc(sort_col))
+
     return query.offset(skip).limit(limit).all()
 
 

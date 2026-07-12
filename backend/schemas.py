@@ -84,6 +84,7 @@ class VehicleCreate(BaseModel):
     registration_number: str = Field(..., max_length=50)
     name_model: str = Field(..., max_length=150)
     type: VehicleType
+    region: Optional[str] = Field(None, max_length=100, description="Operating region / depot")
     max_load_capacity: float = Field(..., gt=0, description="Maximum cargo in kg")
     odometer: float = Field(0.0, ge=0, description="Current odometer reading in km")
     acquisition_cost: float = Field(..., ge=0, description="Purchase/lease cost")
@@ -93,6 +94,7 @@ class VehicleCreate(BaseModel):
 class VehicleUpdate(BaseModel):
     name_model: Optional[str] = None
     type: Optional[VehicleType] = None
+    region: Optional[str] = Field(None, max_length=100)
     max_load_capacity: Optional[float] = Field(None, gt=0)
     odometer: Optional[float] = Field(None, ge=0)
     acquisition_cost: Optional[float] = Field(None, ge=0)
@@ -103,6 +105,7 @@ class VehicleResponse(OrmBase):
     registration_number: str
     name_model: str
     type: VehicleType
+    region: Optional[str]
     max_load_capacity: float
     odometer: float
     acquisition_cost: float
@@ -155,6 +158,19 @@ class DriverResponse(OrmBase):
     status: DriverStatus
     created_at: datetime
     updated_at: datetime
+
+
+class LicenseReminder(OrmBase):
+    """A driver whose license is expired or expiring soon (§ Safety Officer)."""
+    id: int
+    name: str
+    license_number: str
+    license_category: str
+    license_expiry_date: date
+    contact_number: str
+    status: DriverStatus
+    days_until_expiry: int   # negative if already expired
+    is_expired: bool
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -317,6 +333,7 @@ class DashboardKPIs(BaseModel):
 
     total_trips: int
     active_trips: int              # Dispatched
+    pending_trips: int             # Draft (awaiting dispatch)
     completed_trips: int
     cancelled_trips: int
 
@@ -333,6 +350,7 @@ class DashboardKPIs(BaseModel):
 class VehicleAnalytics(BaseModel):
     registration_number: str
     name_model: str
+    region: Optional[str]
     acquisition_cost: float
     total_distance_km: float
     total_fuel_liters: float
