@@ -4,12 +4,12 @@ TransitOps - Vehicles Router (CRUD)
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from backend import models, schemas
 from backend.database import get_db
-from backend.security import get_current_user
+from backend.security import get_current_user, require_roles
 
 router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
 
@@ -23,7 +23,9 @@ router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
 def create_vehicle(
     payload: schemas.VehicleCreate,
     db: Session = Depends(get_db),
-    _: models.User = Depends(get_current_user),
+    _: models.User = Depends(
+        require_roles(models.UserRole.FLEET_MANAGER)
+    ),
 ):
     existing = db.query(models.Vehicle).filter(
         models.Vehicle.registration_number == payload.registration_number
@@ -40,7 +42,11 @@ def create_vehicle(
     return vehicle
 
 
-@router.get("/", response_model=List[schemas.VehicleResponse], summary="List all vehicles")
+@router.get(
+    "/",
+    response_model=List[schemas.VehicleResponse],
+    summary="List all vehicles",
+)
 def list_vehicles(
     skip: int = 0,
     limit: int = 100,
@@ -81,7 +87,9 @@ def update_vehicle(
     payload: schemas.VehicleUpdate,
     registration_number: str,
     db: Session = Depends(get_db),
-    _: models.User = Depends(get_current_user),
+    _: models.User = Depends(
+        require_roles(models.UserRole.FLEET_MANAGER)
+    ),
 ):
     vehicle = db.query(models.Vehicle).filter(
         models.Vehicle.registration_number == registration_number
@@ -105,17 +113,22 @@ def update_vehicle(
 def delete_vehicle(
     registration_number: str,
     db: Session = Depends(get_db),
-    _: models.User = Depends(get_current_user),
+    _: models.User = Depends(
+        require_roles(models.UserRole.FLEET_MANAGER)
+    ),
 ):
     vehicle = db.query(models.Vehicle).filter(
         models.Vehicle.registration_number == registration_number
     ).first()
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found.")
+
     if vehicle.status == models.VehicleStatus.ON_TRIP:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete a vehicle that is currently On Trip.",
         )
+
     db.delete(vehicle)
     db.commit()
+    
