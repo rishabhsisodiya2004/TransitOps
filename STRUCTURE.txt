@@ -1,0 +1,22 @@
+TransitOps/
+├── app/
+│   ├── __init__.py
+│   ├── config.py          # Pydantic BaseSettings — reads .env
+│   ├── database.py        # Engine, SessionLocal, Base, get_db()
+│   ├── main.py            # FastAPI app, middleware, router registration
+│   ├── models.py          # SQLAlchemy ORM models + Python Enums
+│   ├── schemas.py         # Pydantic request/response schemas
+│   ├── security.py        # JWT creation/decoding, bcrypt, auth dependencies
+│   └── routers/
+│       ├── __init__.py
+│       ├── auth.py         # POST /auth/login | /auth/register | /auth/me
+│       ├── vehicles.py     # CRUD /vehicles
+│       ├── drivers.py      # CRUD /drivers
+│       ├── trips.py        # CRUD /trips + business rules + triggers 1 & 2
+│       ├── maintenance.py  # CRUD /maintenance + trigger 3
+│       ├── expenses.py     # CRUD /expenses
+│       └── dashboard.py    # GET /dashboard/kpis | GET /reports/analytics
+├── seed.py                 # Demo data population script
+├── requirements.txt
+├── .env.example
+└── .gitignore
